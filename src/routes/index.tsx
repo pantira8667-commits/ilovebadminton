@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { addDays, format, isSameDay, parseISO } from "date-fns";
 import { th as thLocale } from "date-fns/locale";
@@ -7,13 +7,20 @@ import {
   CheckCircle2,
   Clock,
   Loader2,
+  Lock,
   MapPin,
   Phone,
   Rocket,
+  Timer,
   User,
 } from "lucide-react";
 
-import { createBooking } from "@/lib/booking.functions";
+import {
+  createBooking,
+  getLockedSlots,
+  lockSlot,
+  releaseLock,
+} from "@/lib/booking.functions";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -60,8 +67,10 @@ type FormState = {
   phone: string;
 };
 
+type SlotLock = { lockId: string; expiresAt: number };
+
 type BookingResult = {
-  ok: boolean;
+  ok: true;
   booking: {
     id: string;
     date: string;
@@ -96,11 +105,19 @@ function BookingPage() {
   const [result, setResult] = useState<BookingResult | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
+  // Slot locking state.
+  const [lock, setLock] = useState<SlotLock | null>(null);
+  const [lockedTimes, setLockedTimes] = useState<string[]>([]);
+  const [remainingMs, setRemainingMs] = useState(0);
+  const lockRef = useRef<SlotLock | null>(null);
+  lockRef.current = lock;
+
   const selectedDate = parseISO(form.date);
 
   const isFormValid =
     !!form.court &&
     !!form.time &&
+    !!lock &&
     form.name.trim().length >= 2 &&
     PHONE_RE.test(form.phone.trim());
 
@@ -108,6 +125,97 @@ function BookingPage() {
     setForm((prev) => ({ ...prev, [key]: value }));
     setErrors((prev) => ({ ...prev, [key]: undefined }));
   }
+
+  async function refreshLockedTimes(date: string, court: string | null) {
+    if (!court) {
+      setLockedTimes([]);
+      return;
+    }
+    try {
+      const res = await getLockedSlots({ data: { date, court } });
+      setLockedTimes(res.lockedTimes);
+    } catch {
+      // ignore — mock API
+    }
+  }
+
+  // Fetch locked slots whenever date / court changes.
+  useEffect(() => {
+    void refreshLockedTimes(form.date, form.court);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.date, form.court]);
+
+  // Acquire / release the 5-minute slot lock when the selection changes.
+  useEffect(() => {
+    let cancelled = false;
+    const prev = lockRef.current;
+
+    async function run() {
+      if (prev) {
+        setLock(null);
+        setRemainingMs(0);
+        await releaseLock({ data: { lockId: prev.lockId } }).catch(() => {});
+      }
+      if (!form.date || !form.court || !form.time) return;
+
+      try {
+        const res = await lockSlot({
+          data: { date: form.date, court: form.court, time: form.time },
+        });
+        if (cancelled) {
+          if (res.ok) {
+            await releaseLock({ data: { lockId: res.lockId } }).catch(
+              () => {},
+            );
+          }
+          return;
+        }
+        if (res.ok) {
+          setLock({ lockId: res.lockId, expiresAt: res.expiresAt });
+          setRemainingMs(res.expiresAt - Date.now());
+        } else {
+          // Someone else holds this slot.
+          setForm((f) => ({ ...f, time: null }));
+          setErrors((e) => ({
+            ...e,
+            time: "ช่วงเวลานี้เพิ่งถูกผู้ใช้อื่นเลือกไว้ กรุณาเลือกเวลาอื่น",
+          }));
+          void refreshLockedTimes(form.date, form.court);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.date, form.court, form.time]);
+
+  // Countdown ticker — releases the selection when the lock expires.
+  useEffect(() => {
+    if (!lock) return;
+    const tick = window.setInterval(() => {
+      const r = lock.expiresAt - Date.now();
+      if (r <= 0) {
+        window.clearInterval(tick);
+        setLock(null);
+        setRemainingMs(0);
+        setForm((f) => ({ ...f, time: null }));
+        setErrors((e) => ({
+          ...e,
+          time: "หมดเวลาการล็อกคอร์ทชั่วคราวแล้ว กรุณาเลือกช่วงเวลาอีกครั้ง",
+        }));
+        void refreshLockedTimes(form.date, form.court);
+      } else {
+        setRemainingMs(r);
+      }
+    }, 500);
+    return () => window.clearInterval(tick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lock]);
 
   function validate(): boolean {
     const next: Partial<Record<keyof FormState, string>> = {};
@@ -122,18 +230,37 @@ function BookingPage() {
 
   async function handleSubmit() {
     if (!validate()) return;
+    const currentLock = lockRef.current;
+    if (!currentLock) {
+      setErrors((e) => ({
+        ...e,
+        time: "กรุณาเลือกช่วงเวลาเพื่อล็อกคอร์ทก่อนยืนยัน",
+      }));
+      return;
+    }
     setSubmitting(true);
     try {
       const payload = {
         date: form.date,
-        court: form.court,
-        time: form.time,
+        court: form.court!,
+        time: form.time!,
+        lockId: currentLock.lockId,
         name: form.name.trim(),
         phone: form.phone.trim(),
       };
-      const res = (await createBooking({ data: payload })) as BookingResult;
+      const res = await createBooking({ data: payload });
+      if (!res.ok) {
+        setLock(null);
+        setForm((f) => ({ ...f, time: null }));
+        setErrors({ time: res.message });
+        void refreshLockedTimes(form.date, form.court);
+        return;
+      }
+      setLock(null);
+      setRemainingMs(0);
       setResult(res);
       setModalOpen(true);
+      void refreshLockedTimes(form.date, form.court);
     } catch (err) {
       setErrors({
         name: "ไม่สามารถยืนยันการจองได้ กรุณาลองอีกครั้ง",
@@ -165,6 +292,15 @@ function BookingPage() {
     () => (result ? JSON.stringify(result, null, 2) : ""),
     [result],
   );
+
+  const countdown = useMemo(() => {
+    const total = Math.max(0, Math.ceil(remainingMs / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }, [remainingMs]);
+
+  const urgent = lock !== null && remainingMs <= 60_000;
 
   return (
     <div className="min-h-screen bg-surface text-ink-fg court-grid">
@@ -268,24 +404,78 @@ function BookingPage() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               {TIME_SLOTS.map((time) => {
                 const selected = form.time === time;
+                const taken = lockedTimes.includes(time) && !selected;
                 return (
                   <button
                     key={time}
                     type="button"
+                    disabled={taken}
                     onClick={() => update("time", time)}
                     className={cn(
-                      "rounded-xl border py-3 text-center font-semibold transition-all",
+                      "relative rounded-xl border py-3 text-center font-semibold transition-all",
                       selected
                         ? "border-neon bg-neon text-neon-foreground neon-glow"
-                        : "border-ink-border bg-ink hover:border-neon/50",
+                        : taken
+                          ? "cursor-not-allowed border-ink-border bg-ink/50 text-ink-muted line-through opacity-60"
+                          : "border-ink-border bg-ink hover:border-neon/50",
                     )}
                   >
                     {time}
+                    {taken && (
+                      <span className="absolute right-1.5 top-1.5">
+                        <Lock className="h-3 w-3" />
+                      </span>
+                    )}
                   </button>
                 );
               })}
             </div>
+            <p className="mt-2 text-xs text-ink-muted">
+              เมื่อเลือกเวลา ระบบจะล็อกคอร์ทไว้ให้ 5 นาทีเพื่อกรอกและยืนยันข้อมูล
+            </p>
           </Section>
+
+          {/* Countdown banner */}
+          {lock && form.time && (
+            <div
+              className={cn(
+                "flex items-center justify-between gap-3 rounded-2xl border p-4 transition-colors",
+                urgent
+                  ? "border-destructive bg-destructive/10"
+                  : "border-neon bg-neon-soft neon-glow",
+              )}
+              role="status"
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={cn(
+                    "flex h-10 w-10 items-center justify-center rounded-xl",
+                    urgent
+                      ? "bg-destructive text-destructive-foreground"
+                      : "bg-neon text-neon-foreground",
+                  )}
+                >
+                  <Timer className="h-5 w-5" />
+                </span>
+                <div>
+                  <p className="text-sm font-bold">
+                    ล็อก {form.court} · เวลา {form.time} ไว้แล้ว
+                  </p>
+                  <p className="text-xs text-ink-muted">
+                    กรุณากรอกข้อมูลและยืนยันการจองภายในเวลาที่กำหนด
+                  </p>
+                </div>
+              </div>
+              <div
+                className={cn(
+                  "font-mono text-2xl font-black tabular-nums",
+                  urgent ? "text-destructive" : "text-neon neon-text",
+                )}
+              >
+                {countdown}
+              </div>
+            </div>
+          )}
 
           {/* Form */}
           <Section
@@ -370,6 +560,11 @@ function BookingPage() {
                 <>
                   <CheckCircle2 className="h-4 w-4" />
                   ยืนยันการจอง
+                  {lock && (
+                    <span className="font-mono text-sm font-bold tabular-nums opacity-80">
+                      ({countdown})
+                    </span>
+                  )}
                 </>
               )}
             </Button>
