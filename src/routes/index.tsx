@@ -64,21 +64,23 @@ export const Route = createFileRoute("/")({
 
 type FormState = {
   date: string; // ISO yyyy-MM-dd
-  court: string | null;
+  courts: string[];
   time: string | null;
   duration: 1 | 2;
   name: string;
   phone: string;
 };
 
-type SlotLock = { lockId: string; expiresAt: number };
+type SlotLock = { lockIds: string[]; expiresAt: number };
+
+type LockedEntry = { court: string; time: string };
 
 type BookingResult = {
   ok: true;
   booking: {
     id: string;
     date: string;
-    court: string;
+    courts: string[];
     time: string;
     duration: 1 | 2;
     name: string;
@@ -97,31 +99,31 @@ function BookingPage() {
 
   const [form, setForm] = useState<FormState>({
     date: format(today, "yyyy-MM-dd"),
-    court: null,
+    courts: [],
     time: null,
     duration: 1,
     name: "",
     phone: "",
   });
 
-  const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>(
-    {},
-  );
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<BookingResult | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
   // Slot locking state.
   const [lock, setLock] = useState<SlotLock | null>(null);
-  const [lockedTimes, setLockedTimes] = useState<string[]>([]);
+  const [lockedSlots, setLockedSlots] = useState<LockedEntry[]>([]);
   const [remainingMs, setRemainingMs] = useState(0);
   const lockRef = useRef<SlotLock | null>(null);
   lockRef.current = lock;
 
   const selectedDate = parseISO(form.date);
+  const courtsKey = form.courts.join(",");
+  const totalPrice = PRICE_PER_HOUR * form.duration * form.courts.length;
 
   const isFormValid =
-    !!form.court &&
+    form.courts.length > 0 &&
     !!form.time &&
     !!lock &&
     form.name.trim().length >= 2 &&
@@ -132,24 +134,30 @@ function BookingPage() {
     setErrors((prev) => ({ ...prev, [key]: undefined }));
   }
 
-  async function refreshLockedTimes(date: string, court: string | null) {
-    if (!court) {
-      setLockedTimes([]);
-      return;
-    }
+  function toggleCourt(court: string) {
+    setForm((prev) => ({
+      ...prev,
+      courts: prev.courts.includes(court)
+        ? prev.courts.filter((c) => c !== court)
+        : [...prev.courts, court].sort(),
+    }));
+    setErrors((prev) => ({ ...prev, courts: undefined }));
+  }
+
+  async function refreshLockedSlots(date: string) {
     try {
-      const res = await getLockedSlots({ data: { date, court } });
-      setLockedTimes(res.lockedTimes);
+      const res = await getLockedSlots({ data: { date } });
+      setLockedSlots(res.locked);
     } catch {
       // ignore — mock API
     }
   }
 
-  // Fetch locked slots whenever date / court changes.
+  // Fetch locked slots whenever the date changes.
   useEffect(() => {
-    void refreshLockedTimes(form.date, form.court);
+    void refreshLockedSlots(form.date);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.date, form.court]);
+  }, [form.date]);
 
   // Acquire / release the 5-minute slot lock when the selection changes.
   useEffect(() => {
@@ -160,33 +168,39 @@ function BookingPage() {
       if (prev) {
         setLock(null);
         setRemainingMs(0);
-        await releaseLock({ data: { lockId: prev.lockId } }).catch(() => {});
+        await releaseLock({ data: { lockIds: prev.lockIds } }).catch(
+          () => {},
+        );
       }
-      if (!form.date || !form.court || !form.time) return;
+      if (!form.date || form.courts.length === 0 || !form.time) return;
 
       try {
         const res = await lockSlot({
-          data: { date: form.date, court: form.court, time: form.time },
+          data: { date: form.date, courts: form.courts, time: form.time },
         });
         if (cancelled) {
           if (res.ok) {
-            await releaseLock({ data: { lockId: res.lockId } }).catch(
+            await releaseLock({ data: { lockIds: res.lockIds } }).catch(
               () => {},
             );
           }
           return;
         }
         if (res.ok) {
-          setLock({ lockId: res.lockId, expiresAt: res.expiresAt });
+          setLock({ lockIds: res.lockIds, expiresAt: res.expiresAt });
           setRemainingMs(res.expiresAt - Date.now());
         } else {
-          // Someone else holds this slot.
-          setForm((f) => ({ ...f, time: null }));
+          // Some courts are already locked by someone else — drop them.
+          const taken = res.conflicts;
+          setForm((f) => ({
+            ...f,
+            courts: f.courts.filter((c) => !taken.includes(c)),
+          }));
           setErrors((e) => ({
             ...e,
-            time: "ช่วงเวลานี้เพิ่งถูกผู้ใช้อื่นเลือกไว้ กรุณาเลือกเวลาอื่น",
+            courts: `${taken.join(", ")} เพิ่งถูกผู้ใช้อื่นเลือกไว้ในเวลานี้`,
           }));
-          void refreshLockedTimes(form.date, form.court);
+          void refreshLockedSlots(form.date);
         }
       } catch (err) {
         console.error(err);
@@ -198,7 +212,7 @@ function BookingPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.date, form.court, form.time]);
+  }, [form.date, courtsKey, form.time]);
 
   // Countdown ticker — releases the selection when the lock expires.
   useEffect(() => {
@@ -214,7 +228,7 @@ function BookingPage() {
           ...e,
           time: "หมดเวลาการล็อกคอร์ทชั่วคราวแล้ว กรุณาเลือกช่วงเวลาอีกครั้ง",
         }));
-        void refreshLockedTimes(form.date, form.court);
+        void refreshLockedSlots(form.date);
       } else {
         setRemainingMs(r);
       }
@@ -224,8 +238,8 @@ function BookingPage() {
   }, [lock]);
 
   function validate(): boolean {
-    const next: Partial<Record<keyof FormState, string>> = {};
-    if (!form.court) next.court = "กรุณาเลือกคอร์ท";
+    const next: Partial<Record<string, string>> = {};
+    if (form.courts.length === 0) next.courts = "กรุณาเลือกคอร์ทอย่างน้อย 1 คอร์ท";
     if (!form.time) next.time = "กรุณาเลือกช่วงเวลา";
     if (form.name.trim().length < 2) next.name = "กรุณากรอกชื่อให้ถูกต้อง";
     if (!PHONE_RE.test(form.phone.trim()))
@@ -248,10 +262,10 @@ function BookingPage() {
     try {
       const payload = {
         date: form.date,
-        court: form.court!,
+        courts: form.courts,
         time: form.time!,
         duration: form.duration,
-        lockId: currentLock.lockId,
+        lockIds: currentLock.lockIds,
         name: form.name.trim(),
         phone: form.phone.trim(),
       };
@@ -260,14 +274,14 @@ function BookingPage() {
         setLock(null);
         setForm((f) => ({ ...f, time: null }));
         setErrors({ time: res.message });
-        void refreshLockedTimes(form.date, form.court);
+        void refreshLockedSlots(form.date);
         return;
       }
       setLock(null);
       setRemainingMs(0);
       setResult(res);
       setModalOpen(true);
-      void refreshLockedTimes(form.date, form.court);
+      void refreshLockedSlots(form.date);
     } catch (err) {
       setErrors({
         name: "ไม่สามารถยืนยันการจองได้ กรุณาลองอีกครั้ง",
@@ -284,7 +298,7 @@ function BookingPage() {
       JSON.stringify(
         {
           date: form.date,
-          court: form.court,
+          courts: form.courts,
           time: form.time,
           duration: form.duration,
           name: form.name.trim(),
@@ -358,21 +372,27 @@ function BookingPage() {
             </p>
           </Section>
 
-          {/* Court */}
+          {/* Court (multi-select) */}
           <Section
             icon={<MapPin className="h-4 w-4" />}
             step={2}
-            title="เลือกคอร์ท"
-            error={errors.court}
+            title="เลือกคอร์ท (เลือกได้หลายคอร์ท)"
+            error={errors.courts}
           >
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {COURTS.map((court) => {
-                const selected = form.court === court;
+                const selected = form.courts.includes(court);
+                const takenAtTime =
+                  !selected &&
+                  form.time !== null &&
+                  lockedSlots.some(
+                    (l) => l.court === court && l.time === form.time,
+                  );
                 return (
                   <button
                     key={court}
                     type="button"
-                    onClick={() => update("court", court)}
+                    onClick={() => toggleCourt(court)}
                     className={cn(
                       "group relative flex flex-col items-center gap-2 rounded-xl border p-5 transition-all",
                       selected
@@ -391,6 +411,12 @@ function BookingPage() {
                       {court.replace("คอร์ท ", "")}
                     </div>
                     <span className="text-sm font-semibold">{court}</span>
+                    {takenAtTime && (
+                      <span className="flex items-center gap-1 text-[11px] text-ink-muted">
+                        <Lock className="h-3 w-3" />
+                        ไม่ว่างเวลานี้
+                      </span>
+                    )}
                     {selected && (
                       <span className="absolute right-2 top-2 text-neon">
                         <CheckCircle2 className="h-4 w-4" />
@@ -400,6 +426,9 @@ function BookingPage() {
                 );
               })}
             </div>
+            <p className="mt-2 text-xs text-ink-muted">
+              เลือกได้มากกว่า 1 คอร์ทหากว่าง ราคาคิดตามจำนวนคอร์ท
+            </p>
           </Section>
 
           {/* Time */}
@@ -412,7 +441,10 @@ function BookingPage() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               {TIME_SLOTS.map((time) => {
                 const selected = form.time === time;
-                const taken = lockedTimes.includes(time) && !selected;
+                const taken =
+                  !selected &&
+                  lockedSlots.filter((l) => l.time === time).length >=
+                    COURTS.length;
                 return (
                   <button
                     key={time}
@@ -439,7 +471,7 @@ function BookingPage() {
               })}
             </div>
             <p className="mt-2 text-xs text-ink-muted">
-              เมื่อเลือกเวลา ระบบจะล็อกคอร์ทไว้ให้ 5 นาทีเพื่อกรอกและยืนยันข้อมูล
+              เมื่อเลือกเวลา ระบบจะล็อกคอร์ทที่เลือกไว้ให้ 5 นาทีเพื่อกรอกและยืนยันข้อมูล
             </p>
           </Section>
 
@@ -471,7 +503,7 @@ function BookingPage() {
                         selected ? "opacity-80" : "text-ink-muted",
                       )}
                     >
-                      ฿{PRICE_PER_HOUR * d}
+                      ฿{PRICE_PER_HOUR * d} / คอร์ท
                     </span>
                   </button>
                 );
@@ -480,7 +512,7 @@ function BookingPage() {
           </Section>
 
           {/* Countdown banner */}
-          {lock && form.time && (
+          {lock && form.time && form.courts.length > 0 && (
             <div
               className={cn(
                 "flex items-center justify-between gap-3 rounded-2xl border p-4 transition-colors",
@@ -493,7 +525,7 @@ function BookingPage() {
               <div className="flex items-center gap-3">
                 <span
                   className={cn(
-                    "flex h-10 w-10 items-center justify-center rounded-xl",
+                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
                     urgent
                       ? "bg-destructive text-destructive-foreground"
                       : "bg-neon text-neon-foreground",
@@ -503,7 +535,7 @@ function BookingPage() {
                 </span>
                 <div>
                   <p className="text-sm font-bold">
-                    ล็อก {form.court} · เวลา {form.time} ไว้แล้ว
+                    ล็อก {form.courts.join(", ")} · เวลา {form.time} ไว้แล้ว
                   </p>
                   <p className="text-xs text-ink-muted">
                     กรุณากรอกข้อมูลและยืนยันการจองภายในเวลาที่กำหนด
@@ -584,12 +616,15 @@ function BookingPage() {
           <div className="rounded-2xl border border-ink-border bg-ink p-5">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
               <SummaryItem label="วันที่" value={format(selectedDate, "d MMM yyyy", { locale: thLocale })} />
-              <SummaryItem label="คอร์ท" value={form.court ?? "—"} />
+              <SummaryItem
+                label="คอร์ท"
+                value={form.courts.length > 0 ? form.courts.join(", ") : "—"}
+              />
               <SummaryItem label="เวลา" value={form.time ?? "—"} />
               <SummaryItem label="ระยะเวลา" value={`${form.duration} ชม.`} />
               <SummaryItem
-                label="ราคา"
-                value={`฿${PRICE_PER_HOUR * form.duration}`}
+                label="ราคารวม"
+                value={form.courts.length > 0 ? `฿${totalPrice}` : "—"}
               />
             </div>
             <Button
@@ -752,12 +787,12 @@ function BookingDialog({
                     locale: thLocale,
                   })}
                 />
-                <DetailRow label="คอร์ท" value={b.court} />
+                <DetailRow label="คอร์ท" value={b.courts.join(", ")} />
                 <DetailRow label="เวลา" value={`${b.time} น.`} />
                 <DetailRow label="ระยะเวลา" value={`${b.duration} ชม.`} />
                 <DetailRow
-                  label="ราคา"
-                  value={`฿${PRICE_PER_HOUR * b.duration}`}
+                  label="ราคารวม"
+                  value={`฿${PRICE_PER_HOUR * b.duration * b.courts.length}`}
                 />
                 <DetailRow label="ชื่อผู้จอง" value={b.name} />
                 <DetailRow label="เบอร์โทร" value={b.phone} />
