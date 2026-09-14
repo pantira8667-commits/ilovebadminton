@@ -66,6 +66,7 @@ type FormState = {
   date: string; // ISO yyyy-MM-dd
   court: string | null;
   time: string | null;
+  duration: 1 | 2;
   name: string;
   phone: string;
 };
@@ -79,6 +80,7 @@ type BookingResult = {
     date: string;
     court: string;
     time: string;
+    duration: 1 | 2;
     name: string;
     phone: string;
     status: "confirmed";
