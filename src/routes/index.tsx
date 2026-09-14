@@ -99,6 +99,7 @@ function BookingPage() {
     date: format(today, "yyyy-MM-dd"),
     court: null,
     time: null,
+    duration: 1,
     name: "",
     phone: "",
   });
