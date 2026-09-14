@@ -1,12 +1,7 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import {
-  addDays,
-  format,
-  isSameDay,
-  parseISO,
-  th as thLocale,
-} from "date-fns";
+import { addDays, format, isSameDay, parseISO } from "date-fns";
+import { th as thLocale } from "date-fns/locale";
 import {
   CalendarDays,
   CheckCircle2,
@@ -435,7 +430,7 @@ function Section({
   icon: React.ReactNode;
   step: number;
   title: string;
-  error?: string;
+  error?: string | undefined;
   children: React.ReactNode;
 }) {
   return (
