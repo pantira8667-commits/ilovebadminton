@@ -250,6 +250,7 @@ function BookingPage() {
         date: form.date,
         court: form.court!,
         time: form.time!,
+        duration: form.duration,
         lockId: currentLock.lockId,
         name: form.name.trim(),
         phone: form.phone.trim(),
@@ -285,6 +286,7 @@ function BookingPage() {
           date: form.date,
           court: form.court,
           time: form.time,
+          duration: form.duration,
           name: form.name.trim(),
           phone: form.phone.trim(),
         },
@@ -441,6 +443,42 @@ function BookingPage() {
             </p>
           </Section>
 
+          {/* Duration */}
+          <Section
+            icon={<Hourglass className="h-4 w-4" />}
+            step={4}
+            title="ระยะเวลาจอง"
+          >
+            <div className="grid grid-cols-2 gap-3">
+              {DURATIONS.map((d) => {
+                const selected = form.duration === d;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => update("duration", d)}
+                    className={cn(
+                      "flex flex-col items-center gap-0.5 rounded-xl border py-3.5 transition-all",
+                      selected
+                        ? "border-neon bg-neon text-neon-foreground neon-glow"
+                        : "border-ink-border bg-ink hover:border-neon/50",
+                    )}
+                  >
+                    <span className="text-base font-bold">{d} ชั่วโมง</span>
+                    <span
+                      className={cn(
+                        "text-xs",
+                        selected ? "opacity-80" : "text-ink-muted",
+                      )}
+                    >
+                      ฿{PRICE_PER_HOUR * d}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </Section>
+
           {/* Countdown banner */}
           {lock && form.time && (
             <div
@@ -486,7 +524,7 @@ function BookingPage() {
           {/* Form */}
           <Section
             icon={<User className="h-4 w-4" />}
-            step={4}
+            step={5}
             title="ข้อมูลผู้จอง"
           >
             <div className="space-y-4">
@@ -548,7 +586,11 @@ function BookingPage() {
               <SummaryItem label="วันที่" value={format(selectedDate, "d MMM yyyy", { locale: thLocale })} />
               <SummaryItem label="คอร์ท" value={form.court ?? "—"} />
               <SummaryItem label="เวลา" value={form.time ?? "—"} />
-              <SummaryItem label="ราคา" value="฿300 / ชม." />
+              <SummaryItem label="ระยะเวลา" value={`${form.duration} ชม.`} />
+              <SummaryItem
+                label="ราคา"
+                value={`฿${PRICE_PER_HOUR * form.duration}`}
+              />
             </div>
             <Button
               type="button"
@@ -712,7 +754,11 @@ function BookingDialog({
                 />
                 <DetailRow label="คอร์ท" value={b.court} />
                 <DetailRow label="เวลา" value={`${b.time} น.`} />
-                <DetailRow label="ราคา" value="฿300" />
+                <DetailRow label="ระยะเวลา" value={`${b.duration} ชม.`} />
+                <DetailRow
+                  label="ราคา"
+                  value={`฿${PRICE_PER_HOUR * b.duration}`}
+                />
                 <DetailRow label="ชื่อผู้จอง" value={b.name} />
                 <DetailRow label="เบอร์โทร" value={b.phone} />
               </div>
