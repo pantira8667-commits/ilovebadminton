@@ -171,3 +171,25 @@
     color: var(--color-foreground);
   }
 }
+
+@utility neon-glow {
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--neon) 60%, transparent),
+    0 0 24px -4px color-mix(in oklab, var(--neon) 55%, transparent);
+}
+
+@utility neon-text {
+  text-shadow: 0 0 18px color-mix(in oklab, var(--neon) 55%, transparent);
+}
+
+@utility court-grid {
+  background-image: linear-gradient(
+      color-mix(in oklab, var(--neon) 7%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--neon) 7%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 32px 32px;
+}
