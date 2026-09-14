@@ -4,9 +4,10 @@ import { z } from "zod";
 /**
  * Mock booking API with temporary slot locking.
  *
- * When a user picks a time slot, the slot is locked for 5 minutes so they can
- * fill in their details and confirm. The lock must be presented (lockId) when
- * confirming; expired or missing locks are rejected.
+ * When a user picks a time slot, the selected court(s) are locked for 5
+ * minutes so they can fill in their details and confirm. The locks must be
+ * presented (lockIds) when confirming; expired or missing locks are rejected.
+ * Multiple courts can be locked/booked at once when available.
  *
  * In a real app this would live in a database (Lovable Cloud). Here we keep an
  * in-memory store as a mock.
@@ -35,75 +36,89 @@ function sweepExpired() {
   }
 }
 
-const slotSchema = z.object({
+const newLockId = () =>
+  `LK-${Date.now().toString(36).toUpperCase()}-${Math.random()
+    .toString(36)
+    .slice(2, 6)
+    .toUpperCase()}`;
+
+const courtsField = z
+  .array(z.string().min(1))
+  .min(1, "กรุณาเลือกคอร์ทอย่างน้อย 1 คอร์ท");
+
+const lockInputSchema = z.object({
   date: z.string().min(1, "กรุณาเลือกวันที่"),
-  court: z.string().min(1, "กรุณาเลือกคอร์ท"),
+  courts: courtsField,
   time: z.string().min(1, "กรุณาเลือกช่วงเวลา"),
 });
 
-/** Lock a slot for 5 minutes. */
+/** Lock one or more court slots for 5 minutes (all-or-nothing). */
 export const lockSlot = createServerFn({ method: "POST" })
-  .inputValidator((raw) => slotSchema.parse(raw))
+  .inputValidator((raw) => lockInputSchema.parse(raw))
   .handler(async ({ data }) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     sweepExpired();
 
-    const key = slotKey(data.date, data.court, data.time);
-    if (locks.has(key)) {
-      return { ok: false as const, reason: "locked" as const };
+    const conflicts = data.courts.filter((court) =>
+      locks.has(slotKey(data.date, court, data.time)),
+    );
+    if (conflicts.length > 0) {
+      return { ok: false as const, reason: "locked" as const, conflicts };
     }
 
-    const entry: LockEntry = {
-      lockId: `LK-${Date.now().toString(36).toUpperCase()}-${Math.random()
-        .toString(36)
-        .slice(2, 6)
-        .toUpperCase()}`,
-      ...data,
-      expiresAt: Date.now() + LOCK_DURATION_MS,
-    };
-    locks.set(key, entry);
+    const expiresAt = Date.now() + LOCK_DURATION_MS;
+    const lockIds: string[] = [];
+    for (const court of data.courts) {
+      const entry: LockEntry = {
+        lockId: newLockId(),
+        date: data.date,
+        court,
+        time: data.time,
+        expiresAt,
+      };
+      locks.set(slotKey(data.date, court, data.time), entry);
+      lockIds.push(entry.lockId);
+    }
 
     return {
       ok: true as const,
-      lockId: entry.lockId,
-      expiresAt: entry.expiresAt,
+      lockIds,
+      expiresAt,
       expiresInSec: LOCK_DURATION_MS / 1000,
     };
   });
 
-/** Release a lock early (user changed slot / cancelled). */
+/** Release locks early (user changed slot / cancelled). */
 export const releaseLock = createServerFn({ method: "POST" })
-  .inputValidator((raw) => z.object({ lockId: z.string().min(1) }).parse(raw))
+  .inputValidator((raw) =>
+    z.object({ lockIds: z.array(z.string().min(1)).min(1) }).parse(raw),
+  )
   .handler(async ({ data }) => {
+    const ids = new Set(data.lockIds);
     for (const [key, lock] of locks) {
-      if (lock.lockId === data.lockId) {
-        locks.delete(key);
-        return { ok: true as const };
-      }
+      if (ids.has(lock.lockId)) locks.delete(key);
     }
     return { ok: true as const };
   });
 
-/** List time slots currently locked for a date + court. */
+/** List currently locked {court, time} pairs for a date. */
 export const getLockedSlots = createServerFn({ method: "GET" })
   .inputValidator((raw) =>
-    z
-      .object({ date: z.string().min(1), court: z.string().min(1) })
-      .parse(raw),
+    z.object({ date: z.string().min(1) }).parse(raw),
   )
   .handler(async ({ data }) => {
     sweepExpired();
-    const times: string[] = [];
+    const entries: Array<{ court: string; time: string }> = [];
     for (const lock of locks.values()) {
-      if (lock.date === data.date && lock.court === data.court) {
-        times.push(lock.time);
+      if (lock.date === data.date) {
+        entries.push({ court: lock.court, time: lock.time });
       }
     }
-    return { lockedTimes: times };
+    return { locked: entries };
   });
 
-const bookingSchema = slotSchema.extend({
-  lockId: z.string().min(1, "ไม่พบการล็อกคอร์ท"),
+const bookingSchema = lockInputSchema.extend({
+  lockIds: z.array(z.string().min(1)).min(1, "ไม่พบการล็อกคอร์ท"),
   duration: z
     .union([z.literal(1), z.literal(2)])
     .describe("ระยะเวลาจอง (ชั่วโมง)"),
@@ -126,22 +141,26 @@ export const createBooking = createServerFn({ method: "POST" })
     await new Promise((resolve) => setTimeout(resolve, 450));
     sweepExpired();
 
-    // Verify the caller still holds a valid lock for this slot.
-    const key = slotKey(data.date, data.court, data.time);
-    const lock = locks.get(key);
-    if (!lock || lock.lockId !== data.lockId) {
-      return {
-        ok: false as const,
-        reason: "lock_expired" as const,
-        message: "หมดเวลาการล็อกคอร์ทชั่วคราวแล้ว กรุณาเลือกช่วงเวลาอีกครั้ง",
-      };
+    // Verify the caller still holds valid locks for every requested court.
+    const heldIds = new Set(data.lockIds);
+    for (const court of data.courts) {
+      const lock = locks.get(slotKey(data.date, court, data.time));
+      if (!lock || !heldIds.has(lock.lockId)) {
+        return {
+          ok: false as const,
+          reason: "lock_expired" as const,
+          message: "หมดเวลาการล็อกคอร์ทชั่วคราวแล้ว กรุณาเลือกช่วงเวลาอีกครั้ง",
+        };
+      }
     }
 
-    // Consume the lock — the booking is confirmed.
-    locks.delete(key);
+    // Consume the locks — the booking is confirmed.
+    for (const court of data.courts) {
+      locks.delete(slotKey(data.date, court, data.time));
+    }
 
     const id = `BK-${Date.now().toString(36).toUpperCase()}`;
-    const { lockId, ...bookingData } = data;
+    const { lockIds, ...bookingData } = data;
 
     return {
       ok: true as const,
