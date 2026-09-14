@@ -1,14 +1,18 @@
-# Welcome to your Lovable project
+# Badminton Booking Hub
+
+สร้างหน้าเว็บจองคอร์ทแบดมินตันแบบ Responsive โทนสีสปอร์ต (ดำ-เขียวเรืองแสง) มีตัวเลือกวันที่, ปุ่มเลือกคอร์ท (คอร์ท 1, 2, 3), ปุ่มเลือกช่วงเวลา (17:00, 18:00, 19:00, 20:00), ฟอร์มกรอกชื่อและเบอร์โทรศัพท์ พร้อมปุ่มยืนยันการจอง และแสดง modal สรุปรายละเอียดการจองพร้อม mock API JSON payload
 
 This project was built with [Lovable](https://lovable.dev).
 
+**Live app**: https://ilovebadminton.lovable.app
+
 ## Build with Lovable
 
-Open your project in the [Lovable editor](https://lovable.dev) and keep building.
+Continue developing this project in the [Lovable editor](https://lovable.dev/projects/73a5cb12-7f24-497e-87e8-a3bc874e332b).
 
 - **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: connect the project to GitHub and every change made in Lovable is committed straight to your repository.
-- **Full ownership**: this code is yours. Push to your repository and your changes sync back into Lovable, ready for your next prompt.
+- **Stay in sync**: every change made in Lovable is committed straight to this repository.
+- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
 
 ## Development
 
@@ -20,10 +24,3 @@ cd <repository-name>
 npm i
 npm run dev
 ```
-
-## Built with
-
-- TanStack Start
-- TypeScript
-- React
-- Tailwind CSS
