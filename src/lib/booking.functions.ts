@@ -104,6 +104,9 @@ export const getLockedSlots = createServerFn({ method: "GET" })
 
 const bookingSchema = slotSchema.extend({
   lockId: z.string().min(1, "ไม่พบการล็อกคอร์ท"),
+  duration: z
+    .union([z.literal(1), z.literal(2)])
+    .describe("ระยะเวลาจอง (ชั่วโมง)"),
   name: z
     .string()
     .trim()
