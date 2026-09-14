@@ -6,6 +6,7 @@ import {
   CalendarDays,
   CheckCircle2,
   Clock,
+  Hourglass,
   Loader2,
   Lock,
   MapPin,
@@ -35,6 +36,8 @@ import { cn } from "@/lib/utils";
 
 const COURTS = ["คอร์ท 1", "คอร์ท 2", "คอร์ท 3"] as const;
 const TIME_SLOTS = ["17:00", "18:00", "19:00", "20:00"] as const;
+const DURATIONS = [1, 2] as const;
+const PRICE_PER_HOUR = 300;
 
 const PHONE_RE = /^[0-9]{9,10}$/;
 
