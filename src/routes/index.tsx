@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { addDays, format, isSameDay, parseISO } from "date-fns";
 import { th as thLocale } from "date-fns/locale";
@@ -6,14 +6,22 @@ import {
   CalendarDays,
   CheckCircle2,
   Clock,
+  Hourglass,
   Loader2,
+  Lock,
   MapPin,
   Phone,
   Rocket,
+  Timer,
   User,
 } from "lucide-react";
 
-import { createBooking } from "@/lib/booking.functions";
+import {
+  createBooking,
+  getLockedSlots,
+  lockSlot,
+  releaseLock,
+} from "@/lib/booking.functions";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,6 +36,8 @@ import { cn } from "@/lib/utils";
 
 const COURTS = ["คอร์ท 1", "คอร์ท 2", "คอร์ท 3"] as const;
 const TIME_SLOTS = ["17:00", "18:00", "19:00", "20:00"] as const;
+const DURATIONS = [1, 2] as const;
+const PRICE_PER_HOUR = 300;
 
 const PHONE_RE = /^[0-9]{9,10}$/;
 
@@ -54,19 +64,25 @@ export const Route = createFileRoute("/")({
 
 type FormState = {
   date: string; // ISO yyyy-MM-dd
-  court: string | null;
+  courts: string[];
   time: string | null;
+  duration: 1 | 2;
   name: string;
   phone: string;
 };
 
+type SlotLock = { lockIds: string[]; expiresAt: number };
+
+type LockedEntry = { court: string; time: string };
+
 type BookingResult = {
-  ok: boolean;
+  ok: true;
   booking: {
     id: string;
     date: string;
-    court: string;
+    courts: string[];
     time: string;
+    duration: 1 | 2;
     name: string;
     phone: string;
     status: "confirmed";
@@ -83,24 +99,33 @@ function BookingPage() {
 
   const [form, setForm] = useState<FormState>({
     date: format(today, "yyyy-MM-dd"),
-    court: null,
+    courts: [],
     time: null,
+    duration: 1,
     name: "",
     phone: "",
   });
 
-  const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>(
-    {},
-  );
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<BookingResult | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
+  // Slot locking state.
+  const [lock, setLock] = useState<SlotLock | null>(null);
+  const [lockedSlots, setLockedSlots] = useState<LockedEntry[]>([]);
+  const [remainingMs, setRemainingMs] = useState(0);
+  const lockRef = useRef<SlotLock | null>(null);
+  lockRef.current = lock;
+
   const selectedDate = parseISO(form.date);
+  const courtsKey = form.courts.join(",");
+  const totalPrice = PRICE_PER_HOUR * form.duration * form.courts.length;
 
   const isFormValid =
-    !!form.court &&
+    form.courts.length > 0 &&
     !!form.time &&
+    !!lock &&
     form.name.trim().length >= 2 &&
     PHONE_RE.test(form.phone.trim());
 
@@ -109,9 +134,112 @@ function BookingPage() {
     setErrors((prev) => ({ ...prev, [key]: undefined }));
   }
 
+  function toggleCourt(court: string) {
+    setForm((prev) => ({
+      ...prev,
+      courts: prev.courts.includes(court)
+        ? prev.courts.filter((c) => c !== court)
+        : [...prev.courts, court].sort(),
+    }));
+    setErrors((prev) => ({ ...prev, courts: undefined }));
+  }
+
+  async function refreshLockedSlots(date: string) {
+    try {
+      const res = await getLockedSlots({ data: { date } });
+      setLockedSlots(res.locked);
+    } catch {
+      // ignore — mock API
+    }
+  }
+
+  // Fetch locked slots whenever the date changes.
+  useEffect(() => {
+    void refreshLockedSlots(form.date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.date]);
+
+  // Acquire / release the 5-minute slot lock when the selection changes.
+  useEffect(() => {
+    let cancelled = false;
+    const prev = lockRef.current;
+
+    async function run() {
+      if (prev) {
+        setLock(null);
+        setRemainingMs(0);
+        await releaseLock({ data: { lockIds: prev.lockIds } }).catch(
+          () => {},
+        );
+      }
+      if (!form.date || form.courts.length === 0 || !form.time) return;
+
+      try {
+        const res = await lockSlot({
+          data: { date: form.date, courts: form.courts, time: form.time },
+        });
+        if (cancelled) {
+          if (res.ok) {
+            await releaseLock({ data: { lockIds: res.lockIds } }).catch(
+              () => {},
+            );
+          }
+          return;
+        }
+        if (res.ok) {
+          setLock({ lockIds: res.lockIds, expiresAt: res.expiresAt });
+          setRemainingMs(res.expiresAt - Date.now());
+        } else {
+          // Some courts are already locked by someone else — drop them.
+          const taken = res.conflicts;
+          setForm((f) => ({
+            ...f,
+            courts: f.courts.filter((c) => !taken.includes(c)),
+          }));
+          setErrors((e) => ({
+            ...e,
+            courts: `${taken.join(", ")} เพิ่งถูกผู้ใช้อื่นเลือกไว้ในเวลานี้`,
+          }));
+          void refreshLockedSlots(form.date);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.date, courtsKey, form.time]);
+
+  // Countdown ticker — releases the selection when the lock expires.
+  useEffect(() => {
+    if (!lock) return;
+    const tick = window.setInterval(() => {
+      const r = lock.expiresAt - Date.now();
+      if (r <= 0) {
+        window.clearInterval(tick);
+        setLock(null);
+        setRemainingMs(0);
+        setForm((f) => ({ ...f, time: null }));
+        setErrors((e) => ({
+          ...e,
+          time: "หมดเวลาการล็อกคอร์ทชั่วคราวแล้ว กรุณาเลือกช่วงเวลาอีกครั้ง",
+        }));
+        void refreshLockedSlots(form.date);
+      } else {
+        setRemainingMs(r);
+      }
+    }, 500);
+    return () => window.clearInterval(tick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lock]);
+
   function validate(): boolean {
-    const next: Partial<Record<keyof FormState, string>> = {};
-    if (!form.court) next.court = "กรุณาเลือกคอร์ท";
+    const next: Partial<Record<string, string>> = {};
+    if (form.courts.length === 0) next.courts = "กรุณาเลือกคอร์ทอย่างน้อย 1 คอร์ท";
     if (!form.time) next.time = "กรุณาเลือกช่วงเวลา";
     if (form.name.trim().length < 2) next.name = "กรุณากรอกชื่อให้ถูกต้อง";
     if (!PHONE_RE.test(form.phone.trim()))
@@ -122,18 +250,38 @@ function BookingPage() {
 
   async function handleSubmit() {
     if (!validate()) return;
+    const currentLock = lockRef.current;
+    if (!currentLock) {
+      setErrors((e) => ({
+        ...e,
+        time: "กรุณาเลือกช่วงเวลาเพื่อล็อกคอร์ทก่อนยืนยัน",
+      }));
+      return;
+    }
     setSubmitting(true);
     try {
       const payload = {
         date: form.date,
-        court: form.court,
-        time: form.time,
+        courts: form.courts,
+        time: form.time!,
+        duration: form.duration,
+        lockIds: currentLock.lockIds,
         name: form.name.trim(),
         phone: form.phone.trim(),
       };
-      const res = (await createBooking({ data: payload })) as BookingResult;
+      const res = await createBooking({ data: payload });
+      if (!res.ok) {
+        setLock(null);
+        setForm((f) => ({ ...f, time: null }));
+        setErrors({ time: res.message });
+        void refreshLockedSlots(form.date);
+        return;
+      }
+      setLock(null);
+      setRemainingMs(0);
       setResult(res);
       setModalOpen(true);
+      void refreshLockedSlots(form.date);
     } catch (err) {
       setErrors({
         name: "ไม่สามารถยืนยันการจองได้ กรุณาลองอีกครั้ง",
@@ -150,8 +298,9 @@ function BookingPage() {
       JSON.stringify(
         {
           date: form.date,
-          court: form.court,
+          courts: form.courts,
           time: form.time,
+          duration: form.duration,
           name: form.name.trim(),
           phone: form.phone.trim(),
         },
@@ -165,6 +314,15 @@ function BookingPage() {
     () => (result ? JSON.stringify(result, null, 2) : ""),
     [result],
   );
+
+  const countdown = useMemo(() => {
+    const total = Math.max(0, Math.ceil(remainingMs / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }, [remainingMs]);
+
+  const urgent = lock !== null && remainingMs <= 60_000;
 
   return (
     <div className="min-h-screen bg-surface text-ink-fg court-grid">
@@ -214,21 +372,27 @@ function BookingPage() {
             </p>
           </Section>
 
-          {/* Court */}
+          {/* Court (multi-select) */}
           <Section
             icon={<MapPin className="h-4 w-4" />}
             step={2}
-            title="เลือกคอร์ท"
-            error={errors.court}
+            title="เลือกคอร์ท (เลือกได้หลายคอร์ท)"
+            error={errors.courts}
           >
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {COURTS.map((court) => {
-                const selected = form.court === court;
+                const selected = form.courts.includes(court);
+                const takenAtTime =
+                  !selected &&
+                  form.time !== null &&
+                  lockedSlots.some(
+                    (l) => l.court === court && l.time === form.time,
+                  );
                 return (
                   <button
                     key={court}
                     type="button"
-                    onClick={() => update("court", court)}
+                    onClick={() => toggleCourt(court)}
                     className={cn(
                       "group relative flex flex-col items-center gap-2 rounded-xl border p-5 transition-all",
                       selected
@@ -247,6 +411,12 @@ function BookingPage() {
                       {court.replace("คอร์ท ", "")}
                     </div>
                     <span className="text-sm font-semibold">{court}</span>
+                    {takenAtTime && (
+                      <span className="flex items-center gap-1 text-[11px] text-ink-muted">
+                        <Lock className="h-3 w-3" />
+                        ไม่ว่างเวลานี้
+                      </span>
+                    )}
                     {selected && (
                       <span className="absolute right-2 top-2 text-neon">
                         <CheckCircle2 className="h-4 w-4" />
@@ -256,6 +426,9 @@ function BookingPage() {
                 );
               })}
             </div>
+            <p className="mt-2 text-xs text-ink-muted">
+              เลือกได้มากกว่า 1 คอร์ทหากว่าง ราคาคิดตามจำนวนคอร์ท
+            </p>
           </Section>
 
           {/* Time */}
@@ -268,29 +441,122 @@ function BookingPage() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               {TIME_SLOTS.map((time) => {
                 const selected = form.time === time;
+                const taken =
+                  !selected &&
+                  lockedSlots.filter((l) => l.time === time).length >=
+                    COURTS.length;
                 return (
                   <button
                     key={time}
                     type="button"
+                    disabled={taken}
                     onClick={() => update("time", time)}
                     className={cn(
-                      "rounded-xl border py-3 text-center font-semibold transition-all",
+                      "relative rounded-xl border py-3 text-center font-semibold transition-all",
+                      selected
+                        ? "border-neon bg-neon text-neon-foreground neon-glow"
+                        : taken
+                          ? "cursor-not-allowed border-ink-border bg-ink/50 text-ink-muted line-through opacity-60"
+                          : "border-ink-border bg-ink hover:border-neon/50",
+                    )}
+                  >
+                    {time}
+                    {taken && (
+                      <span className="absolute right-1.5 top-1.5">
+                        <Lock className="h-3 w-3" />
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-xs text-ink-muted">
+              เมื่อเลือกเวลา ระบบจะล็อกคอร์ทที่เลือกไว้ให้ 5 นาทีเพื่อกรอกและยืนยันข้อมูล
+            </p>
+          </Section>
+
+          {/* Duration */}
+          <Section
+            icon={<Hourglass className="h-4 w-4" />}
+            step={4}
+            title="ระยะเวลาจอง"
+          >
+            <div className="grid grid-cols-2 gap-3">
+              {DURATIONS.map((d) => {
+                const selected = form.duration === d;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => update("duration", d)}
+                    className={cn(
+                      "flex flex-col items-center gap-0.5 rounded-xl border py-3.5 transition-all",
                       selected
                         ? "border-neon bg-neon text-neon-foreground neon-glow"
                         : "border-ink-border bg-ink hover:border-neon/50",
                     )}
                   >
-                    {time}
+                    <span className="text-base font-bold">{d} ชั่วโมง</span>
+                    <span
+                      className={cn(
+                        "text-xs",
+                        selected ? "opacity-80" : "text-ink-muted",
+                      )}
+                    >
+                      ฿{PRICE_PER_HOUR * d} / คอร์ท
+                    </span>
                   </button>
                 );
               })}
             </div>
           </Section>
 
+          {/* Countdown banner */}
+          {lock && form.time && form.courts.length > 0 && (
+            <div
+              className={cn(
+                "flex items-center justify-between gap-3 rounded-2xl border p-4 transition-colors",
+                urgent
+                  ? "border-destructive bg-destructive/10"
+                  : "border-neon bg-neon-soft neon-glow",
+              )}
+              role="status"
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={cn(
+                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
+                    urgent
+                      ? "bg-destructive text-destructive-foreground"
+                      : "bg-neon text-neon-foreground",
+                  )}
+                >
+                  <Timer className="h-5 w-5" />
+                </span>
+                <div>
+                  <p className="text-sm font-bold">
+                    ล็อก {form.courts.join(", ")} · เวลา {form.time} ไว้แล้ว
+                  </p>
+                  <p className="text-xs text-ink-muted">
+                    กรุณากรอกข้อมูลและยืนยันการจองภายในเวลาที่กำหนด
+                  </p>
+                </div>
+              </div>
+              <div
+                className={cn(
+                  "font-mono text-2xl font-black tabular-nums",
+                  urgent ? "text-destructive" : "text-neon neon-text",
+                )}
+              >
+                {countdown}
+              </div>
+            </div>
+          )}
+
           {/* Form */}
           <Section
             icon={<User className="h-4 w-4" />}
-            step={4}
+            step={5}
             title="ข้อมูลผู้จอง"
           >
             <div className="space-y-4">
@@ -350,9 +616,16 @@ function BookingPage() {
           <div className="rounded-2xl border border-ink-border bg-ink p-5">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
               <SummaryItem label="วันที่" value={format(selectedDate, "d MMM yyyy", { locale: thLocale })} />
-              <SummaryItem label="คอร์ท" value={form.court ?? "—"} />
+              <SummaryItem
+                label="คอร์ท"
+                value={form.courts.length > 0 ? form.courts.join(", ") : "—"}
+              />
               <SummaryItem label="เวลา" value={form.time ?? "—"} />
-              <SummaryItem label="ราคา" value="฿300 / ชม." />
+              <SummaryItem label="ระยะเวลา" value={`${form.duration} ชม.`} />
+              <SummaryItem
+                label="ราคารวม"
+                value={form.courts.length > 0 ? `฿${totalPrice}` : "—"}
+              />
             </div>
             <Button
               type="button"
@@ -370,6 +643,11 @@ function BookingPage() {
                 <>
                   <CheckCircle2 className="h-4 w-4" />
                   ยืนยันการจอง
+                  {lock && (
+                    <span className="font-mono text-sm font-bold tabular-nums opacity-80">
+                      ({countdown})
+                    </span>
+                  )}
                 </>
               )}
             </Button>
@@ -509,9 +787,13 @@ function BookingDialog({
                     locale: thLocale,
                   })}
                 />
-                <DetailRow label="คอร์ท" value={b.court} />
+                <DetailRow label="คอร์ท" value={b.courts.join(", ")} />
                 <DetailRow label="เวลา" value={`${b.time} น.`} />
-                <DetailRow label="ราคา" value="฿300" />
+                <DetailRow label="ระยะเวลา" value={`${b.duration} ชม.`} />
+                <DetailRow
+                  label="ราคารวม"
+                  value={`฿${PRICE_PER_HOUR * b.duration * b.courts.length}`}
+                />
                 <DetailRow label="ชื่อผู้จอง" value={b.name} />
                 <DetailRow label="เบอร์โทร" value={b.phone} />
               </div>
